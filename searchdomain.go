@@ -182,3 +182,11 @@ func CheckIfTerm(terms []any, index int, arrity int) bool {
 	}
 	return allValid
 }
+
+func Fields(field string) []string {
+	if field != "" {
+		return strings.Split(field, ",")
+	} else {
+		return []string{}
+	}
+}
