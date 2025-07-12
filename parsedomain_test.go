@@ -10,14 +10,14 @@ var searchDomainPatterns = []struct {
 	args   []any
 	err    error
 }{
-	{"", []any{}, errSyntax},
-	{"[]", []any{}, errSyntax},
-	{"[()]", []any{}, errSyntax},
-	{"('')", []any{}, errSyntax},
-	{"('','')", []any{}, errSyntax},
-	{"('a','=')", []any{}, errSyntax},
-	{"('name')", []any{}, errSyntax},
-	{"('name','=')", []any{}, errSyntax},
+	{"", []any{}, ErrSyntax},
+	{"[]", []any{}, ErrSyntax},
+	{"[()]", []any{}, ErrSyntax},
+	{"('')", []any{}, ErrSyntax},
+	{"('','')", []any{}, ErrSyntax},
+	{"('a','=')", []any{}, ErrSyntax},
+	{"('name')", []any{}, ErrSyntax},
+	{"('name','=')", []any{}, ErrSyntax},
 
 	{"[('name','=','My Name')]", []any{[]any{"name", "=", "My Name"}}, nil},
 	{"[('name','like','My Name')]", []any{[]any{"name", "like", "My Name"}}, nil},
@@ -37,12 +37,12 @@ var searchDomainPatterns = []struct {
 	{"[('invoice_status', '=', 'to invoice'), ('order_line', 'any', [('product_id.qty_available', '<=', 0)])]", []any{[]any{"invoice_status", "=", "to invoice"}, []any{"order_line", "any", []any{[]any{"product_id.qty_available", "<=", 0}}}}, nil},
 	{"[('invoice_status', '=', 'to invoice'), ('order_line', 'any', [ ('product_id.qty_available', '<=', 0) , ('name','ilike','stud')])]", []any{[]any{"invoice_status", "=", "to invoice"}, []any{"order_line", "any", []any{[]any{"product_id.qty_available", "<=", 0}, []any{"name", "ilike", "stud"}}}}, nil},
 
-	{"[('name','lik','My Name')]", []any{}, errInvalidComparator},
-	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620')]", []any{}, errNotEnoughAndOrTerms},
-	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620'),'|']", []any{}, errSyntax},
+	{"[('name','lik','My Name')]", []any{}, ErrInvalidComparator},
+	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620')]", []any{}, ErrNotEnoughAndOrTerms},
+	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620'),'|']", []any{}, ErrSyntax},
 
 	{"[('name', '=', 'ABC'), '!', ('phone','ilike','7620')]", []any{[]any{"name", "=", "ABC"}, "!", []any{"phone", "ilike", "7620"}}, nil},
-	{"[('name', '=', 'ABC'), '!']", []any{}, errSyntax},
+	{"[('name', '=', 'ABC'), '!']", []any{}, ErrSyntax},
 }
 
 func TestSearchDomain(t *testing.T) {
