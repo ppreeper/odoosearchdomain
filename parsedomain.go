@@ -258,3 +258,11 @@ func checkIf(terms []any, i int) (termCount int, err error) {
 	}
 	return termCount + 2, nil
 }
+
+func Fields(field string) []string {
+	if field != "" {
+		return strings.Split(field, ",")
+	} else {
+		return []string{}
+	}
+}
