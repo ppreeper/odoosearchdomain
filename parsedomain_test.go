@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// searchDomainPatterns contains various test cases for the ParseDomain function.
 var searchDomainPatterns = []struct {
 	domain   string
 	args     []any
@@ -39,34 +40,23 @@ var searchDomainPatterns = []struct {
 	{"[('invoice_status', '=', 'to invoice'), ('order_line', 'any', [ ('product_id.qty_available', '<=', 0) , ('name','ilike','stud')])]", []any{[]any{"invoice_status", "=", "to invoice"}, []any{"order_line", "any", []any{[]any{"product_id.qty_available", "<=", 0}, []any{"name", "ilike", "stud"}}}}, nil, []any{}},
 
 	{"[('name','lik','My Name')]", []any{}, ErrSyntax, []any{}},
-	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620')]", []any{[]any{"name", "=", "ABC"}, "|", []any{"phone", "ilike", "7620"}}, nil, []any{}},
+	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620')]", []any{}, ErrNotEnoughAndOrTerms, []any{}},
 	{"[('name', '=', 'ABC'), '!', ('phone','ilike','7620')]", []any{[]any{"name", "=", "ABC"}, "!", []any{"phone", "ilike", "7620"}}, nil, []any{}},
-	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620'),'|']", []any{[]any{"name", "=", "ABC"}, "|", []any{"phone", "ilike", "7620"}, "|"}, nil, []any{}},
+	{"[('name', '=', 'ABC'), '|', ('phone','ilike','7620'),'|']", []any{}, ErrNotEnoughAndOrTerms, []any{}},
 
 	{"[('name', '=', 'ABC'), '!', ('phone','ilike','7620')]", []any{[]any{"name", "=", "ABC"}, "!", []any{"phone", "ilike", "7620"}}, nil, []any{}},
-	{"[('name', '=', 'ABC'), '!']", []any{[]any{"name", "=", "ABC"}, "!"}, nil, []any{}},
+	{"[('name', '=', 'ABC'), '!']", []any{}, ErrNotEnoughNotTerms, []any{}},
 }
 
+// TestSearchDomain tests the ParseDomain function with various search domain patterns.
 func TestSearchDomain(t *testing.T) {
 	for i, pattern := range searchDomainPatterns {
 		args, err := ParseDomain(pattern.domain)
 		if !reflect.DeepEqual(pattern.args, args) {
-			t.Errorf("\n[%d]: expected reflect\nargs: %v\n got: %v", i, pattern.args, args)
+			t.Errorf("\n[%d]: domain: %s\nexpected reflect\nargs: %v\n got: %v", i, pattern.domain, pattern.args, args)
 		}
 		if err != pattern.err {
-			t.Errorf("\n[%d]: expected error: %v\ndomain: %v\ngot %v", i, pattern.err, pattern.domain, err)
-		}
-	}
-}
-
-func TestValidateDomain(t *testing.T) {
-	for i, pattern := range searchDomainPatterns {
-		_, err := ParseDomain(pattern.domain)
-		if err != nil && pattern.err == nil {
-			t.Errorf("\n[%d]: expected no error for domain: %v\ngot %v", i, pattern.domain, err)
-		}
-		if err == nil && pattern.err != nil {
-			t.Errorf("\n[%d]: expected error: %v\ndomain: %v\ngot no error", i, pattern.err, pattern.domain)
+			t.Errorf("\n[%d]: domain: %v\nexpected error: %v\ngot %v", i, pattern.domain, pattern.err, err)
 		}
 	}
 }

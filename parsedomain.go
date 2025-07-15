@@ -2,23 +2,21 @@ package odoosearchdomain
 
 import (
 	"errors"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-var ErrSyntax = errors.New("invalid syntax")
-
-// ErrInvalidComparator   = errors.New("invalid comparator")
-// ErrInvalidTermValues   = errors.New("invalid term values")
-// ErrNotEnoughAndOrTerms = errors.New("not enough AND/OR terms")
-// ErrNotEnoughNotTerms   = errors.New("not enough NOT terms")
+var (
+	ErrSyntax              = errors.New("invalid syntax")
+	ErrNotEnoughAndOrTerms = errors.New("not enough AND/OR terms")
+	ErrNotEnoughNotTerms   = errors.New("not enough NOT terms")
+)
 
 var (
 	withinSquareBracket = regexp.MustCompile(`\[\s*.?\s*\]|\[\s*.*\s*\]`)
 	comparatorTerm      = regexp.MustCompile(`(?:=|!=|>|>=|<|<=|=\?|like|not like|ilike|not ilike|=ilike|in|not in|child_of|parent_of|any|not any)`)
-	emptySquareBrackets = regexp.MustCompile(`\[\s*\]`)
+	emptySquareBrackets = regexp.MustCompile(`\[\s*\]|\[\s*\(\s*\)\s*\]`)
 	notNode             = regexp.MustCompile(`'!'`)
 	orNode              = regexp.MustCompile(`'\|'`)
 	andNode             = regexp.MustCompile(`'&'`)
@@ -31,21 +29,24 @@ var (
 	intTerm             = regexp.MustCompile(`(\d+)`)
 )
 
+// ParseDomain parses a search domain string and returns a slice of terms or an error.
+// The domain string should be formatted according to the Odoo search domain syntax.
+// It returns an empty slice if the domain is empty or consists of only square brackets.
 func ParseDomain(domain string) (filter []any, err error) {
 	domain = strings.TrimSpace(domain)
 	if domain == "" || emptySquareBrackets.MatchString(domain) {
 		return []any{}, nil
 	}
-	// if !withinSquareBracket.MatchString(domain) {
-	// 	return []any{}, ErrSyntax
-	// }
+	if !withinSquareBracket.MatchString(domain) {
+		return []any{}, nil
+	}
 
 	filter, err = tokenIter(domain)
 	if err != nil {
 		return []any{}, err
 	}
 
-	return filter, nil
+	return ValidateDomain(filter)
 }
 
 func tokenIter(domain string) ([]any, error) {
@@ -171,20 +172,89 @@ func termIter(domain string) (terms []any, err error) {
 	return terms, nil
 }
 
-func validateDomain(domain []any) error {
-	if len(domain) == 0 {
-		return ErrSyntax
-	}
-	if len(domain) == 1 && reflect.TypeOf(domain[0]).Kind() != reflect.Slice {
-		return ErrSyntax
-	}
-	if len(domain) > 1 && reflect.TypeOf(domain[0]).Kind() != reflect.Slice {
-		return ErrSyntax
-	}
-	for _, term := range domain {
-		if reflect.TypeOf(term).Kind() != reflect.Slice && term != "!" && term != "|" && term != "&" {
-			return ErrSyntax
+// ValidateDomain checks the parsed domain terms for correct AND/OR/NOT structure.
+// It returns a slice of validated terms or an error if the structure is invalid.
+func ValidateDomain(terms []any) (results []any, err error) {
+	for i := 0; i < len(terms); i++ {
+		switch terms[i] {
+		case "&", "|":
+			termCount, err := checkAndOr(terms[i:], i)
+			if err != nil {
+				return []any{}, err
+			}
+			results = append(results, terms[i:i+termCount]...)
+			i += termCount
+		case "!":
+			termCount, err := checkIf(terms[i:], i)
+			if err != nil {
+				return []any{}, err
+			}
+			results = append(results, terms[i:i+termCount]...)
+			i += termCount
+		default:
+			results = append(results, terms[i])
 		}
 	}
-	return nil
+	return results, nil
+}
+
+func checkAndOr(terms []any, i int) (termCount int, err error) {
+	termCount = 0
+	if len(terms) < 3 {
+		return i, ErrNotEnoughAndOrTerms
+	}
+
+	switch terms[1] {
+	case "&", "|":
+		tCount, err := checkAndOr(terms[1:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	case "!":
+		tCount, err := checkIf(terms[1:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	}
+
+	switch terms[2] {
+	case "&", "|":
+		tCount, err := checkAndOr(terms[2:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	case "!":
+		tCount, err := checkIf(terms[2:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	}
+
+	return termCount + 3, nil
+}
+
+func checkIf(terms []any, i int) (termCount int, err error) {
+	termCount = 0
+	if len(terms) < 2 {
+		return i, ErrNotEnoughNotTerms
+	}
+	switch terms[1] {
+	case "&", "|":
+		tCount, err := checkAndOr(terms[1:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	case "!":
+		tCount, err := checkIf(terms[1:], i+1)
+		if err != nil {
+			return i, err
+		}
+		termCount += tCount
+	}
+	return termCount + 2, nil
 }
