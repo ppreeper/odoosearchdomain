@@ -46,6 +46,43 @@ var searchDomainPatterns = []struct {
 
 	{"[('name', '=', 'ABC'), '!', ('phone','ilike','7620')]", []any{[]any{"name", "=", "ABC"}, "!", []any{"phone", "ilike", "7620"}}, nil, []any{}},
 	{"[('name', '=', 'ABC'), '!']", []any{}, ErrNotEnoughNotTerms, []any{}},
+
+	// Double-quoted strings
+	{`[("name","=","My Name")]`, []any{[]any{"name", "=", "My Name"}}, nil, []any{}},
+	{`[("name","ilike","John"),("ref","=",42)]`, []any{[]any{"name", "ilike", "John"}, []any{"ref", "=", 42}}, nil, []any{}},
+
+	// Negative numbers
+	{"[('qty','<=',-5)]", []any{[]any{"qty", "<=", -5}}, nil, []any{}},
+	{"[('amount','=',-123.45)]", []any{[]any{"amount", "=", -123.45}}, nil, []any{}},
+
+	// =like and =ilike operators
+	{"[('name','=like','%abc%')]", []any{[]any{"name", "=like", "%abc%"}}, nil, []any{}},
+	{"[('name','=ilike','%abc%')]", []any{[]any{"name", "=ilike", "%abc%"}}, nil, []any{}},
+
+	// =? operator
+	{"[('partner_id','=?',False)]", []any{[]any{"partner_id", "=?", false}}, nil, []any{}},
+
+	// None/nil value
+	{"[('parent_id','=',None)]", []any{[]any{"parent_id", "=", nil}}, nil, []any{}},
+
+	// child_of and parent_of
+	{"[('category_id','child_of',[5])]", []any{[]any{"category_id", "child_of", []any{5}}}, nil, []any{}},
+	{"[('category_id','parent_of',3)]", []any{[]any{"category_id", "parent_of", 3}}, nil, []any{}},
+
+	// Deeply nested prefix operators: & & t1 t2 t3
+	{"['&', '&', ('a','=','1'), ('b','=','2'), ('c','=','3')]", []any{"&", "&", []any{"a", "=", "1"}, []any{"b", "=", "2"}, []any{"c", "=", "3"}}, nil, []any{}},
+
+	// NOT combined with OR: ! | t1 t2
+	{"['!', '|', ('a','=','1'), ('b','=','2')]", []any{"!", "|", []any{"a", "=", "1"}, []any{"b", "=", "2"}}, nil, []any{}},
+
+	// Mixed quotes
+	{`[('name','=',"O'Brien")]`, []any{[]any{"name", "=", "O'Brien"}}, nil, []any{}},
+
+	// Empty list value
+	{"[('ids','in',[])]", []any{[]any{"ids", "in", []any{}}}, nil, []any{}},
+
+	// Value of 0
+	{"[('qty','=',0)]", []any{[]any{"qty", "=", 0}}, nil, []any{}},
 }
 
 // TestSearchDomain tests the ParseDomain function with various search domain patterns.

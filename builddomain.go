@@ -4,17 +4,15 @@ func DomainList(Domains ...any) []any {
 	if len(Domains) == 0 {
 		return []any{}
 	}
-	if len(Domains) == 1 {
-		switch values := Domains[0].(type) {
-		case []any:
-			if len(values) == 0 {
-				return []any{}
-			} else {
-				return values
-			}
+	switch values := Domains[0].(type) {
+	case []any:
+		if len(values) == 0 {
+			return []any{}
 		}
+		return values
+	default:
+		return Domains
 	}
-	return Domains[0].([]any)
 }
 
 func DomainString(Domains ...string) []string {
@@ -56,7 +54,7 @@ func (dom *Domain) AddTerm(field, operator string, value any) *Domain {
 }
 
 func (dom *Domain) Add(term *Term) *Domain {
-	*dom = append(*dom, term)
+	*dom = append(*dom, *term)
 	return dom
 }
 
@@ -75,7 +73,7 @@ func (dom *Domain) Not(term *Term) *Domain {
 func (dom *Domain) combinedTerms(operator string, terms ...*Term) *Domain {
 	*dom = append(*dom, operator)
 	for _, term := range terms {
-		*dom = append(*dom, term)
+		*dom = append(*dom, *term)
 	}
 	return dom
 }
