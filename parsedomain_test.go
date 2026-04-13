@@ -97,3 +97,102 @@ func TestSearchDomain(t *testing.T) {
 		}
 	}
 }
+
+// --- Benchmarks ---
+
+func BenchmarkParseDomain_Empty(b *testing.B) {
+	for b.Loop() {
+		ParseDomain("")
+	}
+}
+
+func BenchmarkParseDomain_SingleTerm(b *testing.B) {
+	const domain = "[('name','=','ABC')]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_ThreeTermsWithOr(b *testing.B) {
+	const domain = "[('name', '=', 'ABC'), '|', ('phone','ilike','7620'), ('mobile', 'ilike', '7620')]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_SixTermsMixed(b *testing.B) {
+	const domain = "[('name', 'like', 'John'),('ref', 'not like', 12345),('value','=',123.45),'|', ('is_company', '=', True),('customer','=',True)]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_NestedDomain(b *testing.B) {
+	const domain = "[('invoice_status', '=', 'to invoice'), ('order_line', 'any', [ ('product_id.qty_available', '<=', 0) , ('name','ilike','stud')])]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_IntList(b *testing.B) {
+	const domain = "[('birthday.month_number', 'in', [10,11,12])]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_StringList(b *testing.B) {
+	const domain = "[('birthday.month', 'in', ['April','May','June'])]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_DeepPrefixNesting(b *testing.B) {
+	const domain = "['&', '&', ('a','=','1'), ('b','=','2'), ('c','=','3')]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_NegativeNumbers(b *testing.B) {
+	const domain = "[('qty','<=',-5),('amount','=',-123.45)]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_InvalidOperator(b *testing.B) {
+	const domain = "[('name','lik','My Name')]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkParseDomain_ValidationError(b *testing.B) {
+	const domain = "[('name', '=', 'ABC'), '|', ('phone','ilike','7620')]"
+	for b.Loop() {
+		ParseDomain(domain)
+	}
+}
+
+func BenchmarkLexer(b *testing.B) {
+	const domain = "[('name', 'like', 'John'),('ref', 'not like', 12345),('value','=',123.45),'|', ('is_company', '=', True),('customer','=',True)]"
+	for b.Loop() {
+		newLexer(domain).tokenize()
+	}
+}
+
+func BenchmarkValidateDomain(b *testing.B) {
+	terms := []any{
+		[]any{"name", "like", "John"},
+		[]any{"ref", "not like", 12345},
+		[]any{"value", "=", 123.45},
+		"|",
+		[]any{"is_company", "=", true},
+		[]any{"customer", "=", true},
+	}
+	for b.Loop() {
+		ValidateDomain(terms)
+	}
+}
