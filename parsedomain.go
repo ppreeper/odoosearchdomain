@@ -30,7 +30,7 @@ const (
 	tokComma              // ,
 	tokString             // 'abc' or "abc"
 	tokInt                // 123, -5
-	tokFloat              // 1.23, -0.5
+	tokFloat              // 1.23, -0.5, 1e+21
 	tokTrue               // True, true
 	tokFalse              // False, false
 	tokNone               // None, none
@@ -122,7 +122,8 @@ func (l *lexer) tokenize() ([]token, error) {
 	}
 }
 
-// lexString reads a single-quoted or double-quoted string with escape support.
+// lexString reads a single-quoted or double-quoted string, decoding backslash
+// escapes the way Python's repr() encodes them (\n, \t, \xNN, \uNNNN, ...).
 func (l *lexer) lexString(quote rune) (token, error) {
 	startPos := l.pos
 	l.advance() // skip opening quote
@@ -130,14 +131,11 @@ func (l *lexer) lexString(quote rune) (token, error) {
 	for l.pos < len(l.input) {
 		r := l.advance()
 		if r == '\\' && l.pos < len(l.input) {
-			next := l.advance()
-			switch next {
-			case '\'', '"', '\\':
-				sb.WriteRune(next)
-			default:
-				sb.WriteRune('\\')
-				sb.WriteRune(next)
+			s, err := l.unescape(l.advance())
+			if err != nil {
+				return token{}, err
 			}
+			sb.WriteString(s)
 			continue
 		}
 		if r == quote {
@@ -148,7 +146,91 @@ func (l *lexer) lexString(quote rune) (token, error) {
 	return token{}, fmt.Errorf("%w: unterminated string starting at position %d", ErrSyntax, startPos)
 }
 
-// lexNumber reads an integer or float, optionally preceded by a minus sign.
+// unescape decodes the rune following a backslash, consuming additional input
+// for multi-character escapes (\xNN, \uNNNN, \UNNNNNNNN). Unknown escapes are
+// passed through as a literal backslash plus the rune. Out-of-range and
+// surrogate code points are rejected rather than silently replaced.
+func (l *lexer) unescape(r rune) (string, error) {
+	switch r {
+	case '\'', '"', '\\':
+		return string(r), nil
+	case 'n':
+		return "\n", nil
+	case 't':
+		return "\t", nil
+	case 'r':
+		return "\r", nil
+	case 'b':
+		return "\b", nil
+	case 'f':
+		return "\f", nil
+	case 'v':
+		return "\v", nil
+	case 'a':
+		return "\a", nil
+	case 'x':
+		if v, ok := l.readHex(2); ok {
+			return string(rune(v)), nil
+		}
+	case 'u':
+		if v, ok := l.readHex(4); ok {
+			return encodedRune(v, l.pos)
+		}
+	case 'U':
+		if v, ok := l.readHex(8); ok {
+			return encodedRune(v, l.pos)
+		}
+	}
+	return "\\" + string(r), nil
+}
+
+// encodedRune converts a decoded escape code point into a string, rejecting
+// values that are not Unicode scalar values (out of range or surrogates).
+func encodedRune(v int64, pos int) (string, error) {
+	if v > unicode.MaxRune || (v >= 0xD800 && v <= 0xDFFF) {
+		return "", fmt.Errorf("%w: invalid Unicode code point U+%04X at position %d", ErrSyntax, v, pos)
+	}
+	return string(rune(v)), nil
+}
+
+// readHex reads n hex digits and returns their value, or false if fewer than
+// n hex digits remain. On failure the input position is left unchanged.
+func (l *lexer) readHex(n int) (int64, bool) {
+	startPos := l.pos
+	var v int64
+	for i := 0; i < n; i++ {
+		if l.pos >= len(l.input) {
+			l.pos = startPos
+			return 0, false
+		}
+		d := hexDigit(l.input[l.pos])
+		if d < 0 {
+			l.pos = startPos
+			return 0, false
+		}
+		v = v*16 + int64(d)
+		l.advance()
+	}
+	return v, true
+}
+
+// hexDigit returns the value of a hexadecimal digit rune, or -1 if not a digit.
+func hexDigit(r rune) int {
+	switch {
+	case r >= '0' && r <= '9':
+		return int(r - '0')
+	case r >= 'a' && r <= 'f':
+		return int(r-'a') + 10
+	case r >= 'A' && r <= 'F':
+		return int(r-'A') + 10
+	default:
+		return -1
+	}
+}
+
+// lexNumber reads an integer or float: an optional minus sign, digits, an
+// optional decimal fraction, and an optional base-10 exponent (1e+21, 1.5E-3).
+// Python's repr() uses scientific notation for large and small floats.
 func (l *lexer) lexNumber() (token, error) {
 	startPos := l.pos
 	var sb strings.Builder
@@ -165,7 +247,9 @@ func (l *lexer) lexNumber() (token, error) {
 		sb.WriteRune(l.advance())
 	}
 
-	// Check for decimal point → float
+	isFloat := false
+
+	// Decimal point → float
 	if l.pos < len(l.input) && l.peek() == '.' {
 		sb.WriteRune(l.advance())
 		if l.pos >= len(l.input) || !unicode.IsDigit(l.peek()) {
@@ -174,9 +258,32 @@ func (l *lexer) lexNumber() (token, error) {
 		for l.pos < len(l.input) && unicode.IsDigit(l.peek()) {
 			sb.WriteRune(l.advance())
 		}
-		return token{typ: tokFloat, str: sb.String(), pos: startPos}, nil
+		isFloat = true
 	}
 
+	// Exponent → float (e.g. 1e+21, 1.5e-3)
+	if l.pos < len(l.input) && (l.peek() == 'e' || l.peek() == 'E') {
+		savePos := l.pos
+		var exp strings.Builder
+		exp.WriteRune(l.advance())
+		if l.pos < len(l.input) && (l.peek() == '+' || l.peek() == '-') {
+			exp.WriteRune(l.advance())
+		}
+		if l.pos >= len(l.input) || !unicode.IsDigit(l.peek()) {
+			// Not an exponent after all (e.g. "1edge" is 1 + keyword "edge").
+			l.pos = savePos
+		} else {
+			for l.pos < len(l.input) && unicode.IsDigit(l.peek()) {
+				exp.WriteRune(l.advance())
+			}
+			sb.WriteString(exp.String())
+			isFloat = true
+		}
+	}
+
+	if isFloat {
+		return token{typ: tokFloat, str: sb.String(), pos: startPos}, nil
+	}
 	return token{typ: tokInt, str: sb.String(), pos: startPos}, nil
 }
 
@@ -204,6 +311,11 @@ func (l *lexer) lexKeyword() (token, error) {
 // Phase 2: Recursive Descent Parser
 // ============================================================
 
+// maxNestingDepth bounds recursion during parsing and validation. Domains
+// that nest deeper (lists within lists, or chains of prefix operators) are
+// rejected with ErrSyntax instead of exhausting the stack.
+const maxNestingDepth = 1000
+
 // validComparators is the complete set of Odoo domain operators.
 var validComparators = map[string]bool{
 	"=": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true,
@@ -215,6 +327,7 @@ var validComparators = map[string]bool{
 type parser struct {
 	tokens []token
 	pos    int
+	depth  int // current bracket-nesting depth (guarded by maxNestingDepth)
 }
 
 func newParser(tokens []token) *parser {
@@ -375,6 +488,10 @@ func (p *parser) parseTerm() ([]any, error) {
 
 // parseValue parses: STRING | INT | FLOAT | TRUE | FALSE | NONE | list-or-domain
 func (p *parser) parseValue() (any, error) {
+	if p.depth >= maxNestingDepth {
+		return nil, fmt.Errorf("%w: nesting exceeds %d levels", ErrSyntax, maxNestingDepth)
+	}
+
 	t := p.peek()
 
 	switch t.typ {
@@ -384,10 +501,16 @@ func (p *parser) parseValue() (any, error) {
 	case tokInt:
 		p.advance()
 		n, err := strconv.Atoi(t.str)
-		if err != nil {
-			return nil, fmt.Errorf("%w: invalid integer %q", ErrSyntax, t.str)
+		if err == nil {
+			return n, nil
 		}
-		return n, nil
+		// Python integers are unbounded; on int overflow fall back to float64.
+		if errors.Is(err, strconv.ErrRange) {
+			if f, ferr := strconv.ParseFloat(t.str, 64); ferr == nil {
+				return f, nil
+			}
+		}
+		return nil, fmt.Errorf("%w: invalid integer %q", ErrSyntax, t.str)
 	case tokFloat:
 		p.advance()
 		f, err := strconv.ParseFloat(t.str, 64)
@@ -405,25 +528,49 @@ func (p *parser) parseValue() (any, error) {
 		p.advance()
 		return nil, nil
 	case tokLBracket:
-		return p.parseListOrDomain()
+		p.depth++
+		v, err := p.parseListOrDomain()
+		p.depth--
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
 	default:
 		return nil, fmt.Errorf("%w: unexpected token in value position at %d", ErrSyntax, t.pos)
 	}
 }
 
 // parseListOrDomain disambiguates between a nested domain [(...), ...] and a plain list [1,2,3].
-// If the first element after [ is '(' or a connector string, it tries domain parsing first.
+// If the first element after [ is a tuple or a connector string, it tries domain
+// parsing first. Nested domains are validated here, since only the parser knows
+// which interpretation was chosen.
 func (p *parser) parseListOrDomain() (any, error) {
 	next := p.peekAt(1) // token after '['
 
-	// If first element looks like a domain (tuple start or connector), try domain parse.
-	if next.typ == tokLParen || (next.typ == tokString && (next.str == "&" || next.str == "|" || next.str == "!")) {
+	// A plain value list can never start with '(' — a term tuple is the only
+	// reading, so propagate domain errors instead of masking them.
+	if next.typ == tokLParen {
+		domain, err := p.parseDomain()
+		if err != nil {
+			return nil, err
+		}
+		if err := validateTerms(domain, p.depth); err != nil {
+			return nil, err
+		}
+		return domain, nil
+	}
+
+	// If the first element looks like a domain connector, try domain parsing.
+	if next.typ == tokString && (next.str == "&" || next.str == "|" || next.str == "!") {
 		savePos := p.pos
 		domain, err := p.parseDomain()
 		if err == nil {
+			if verr := validateTerms(domain, p.depth); verr != nil {
+				return nil, verr
+			}
 			return domain, nil
 		}
-		p.pos = savePos // backtrack on failure
+		p.pos = savePos // backtrack: it was a plain list of strings
 	}
 
 	// Otherwise parse as a plain value list.
@@ -475,20 +622,55 @@ func (p *parser) parseList() ([]any, error) {
 // validateDomain walks the flat token list and checks that every & and | has
 // 2 operands, and every ! has 1 operand, using proper recursive consumption.
 func validateDomain(terms []any) ([]any, error) {
-	pos := 0
-	for pos < len(terms) {
-		count, err := validateAt(terms, pos)
-		if err != nil {
-			return []any{}, err
-		}
-		pos += count
+	if err := validateTerms(terms, 0); err != nil {
+		return []any{}, err
 	}
 	return terms, nil
 }
 
+// validateTerms checks a complete term sequence at the given nesting depth.
+// Nested domains held in term values are validated recursively.
+func validateTerms(terms []any, depth int) error {
+	pos := 0
+	for pos < len(terms) {
+		count, err := validateAt(terms, pos, depth)
+		if err != nil {
+			return err
+		}
+		pos += count
+	}
+	return nil
+}
+
+// looksLikeDomain reports whether v starts like a prefix-notation domain: a
+// term tuple, or a connector followed by at least one term tuple. Requiring a
+// tuple keeps plain string lists such as ['&', 'a'] out.
+func looksLikeDomain(v []any) bool {
+	if len(v) == 0 {
+		return false
+	}
+	switch first := v[0].(type) {
+	case []any:
+		return true
+	case string:
+		if first != "&" && first != "|" && first != "!" {
+			return false
+		}
+		for _, elem := range v[1:] {
+			if _, ok := elem.([]any); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // validateAt validates the expression rooted at terms[pos] and returns
 // the number of tokens consumed by that expression.
-func validateAt(terms []any, pos int) (int, error) {
+func validateAt(terms []any, pos, depth int) (int, error) {
+	if depth >= maxNestingDepth {
+		return 0, fmt.Errorf("%w: nesting exceeds %d levels", ErrSyntax, maxNestingDepth)
+	}
 	if pos >= len(terms) {
 		return 0, fmt.Errorf("%w: unexpected end of domain", ErrSyntax)
 	}
@@ -499,14 +681,14 @@ func validateAt(terms []any, pos int) (int, error) {
 		if pos+1 >= len(terms) {
 			return 0, ErrNotEnoughAndOrTerms
 		}
-		count1, err := validateAt(terms, pos+1)
+		count1, err := validateAt(terms, pos+1, depth+1)
 		if err != nil {
 			return 0, err
 		}
 		if pos+1+count1 >= len(terms) {
 			return 0, ErrNotEnoughAndOrTerms
 		}
-		count2, err := validateAt(terms, pos+1+count1)
+		count2, err := validateAt(terms, pos+1+count1, depth+1)
 		if err != nil {
 			return 0, err
 		}
@@ -517,14 +699,22 @@ func validateAt(terms []any, pos int) (int, error) {
 		if pos+1 >= len(terms) {
 			return 0, ErrNotEnoughNotTerms
 		}
-		count, err := validateAt(terms, pos+1)
+		count, err := validateAt(terms, pos+1, depth+1)
 		if err != nil {
 			return 0, err
 		}
 		return 1 + count, nil
 
 	default:
-		// Leaf term (a []any tuple) — consumes 1
+		// Leaf term (a []any tuple) — consumes 1. Validate any nested domain
+		// held in the term's value.
+		if term, ok := terms[pos].([]any); ok && len(term) == 3 {
+			if nested, ok := term[2].([]any); ok && looksLikeDomain(nested) {
+				if err := validateTerms(nested, depth+1); err != nil {
+					return 0, err
+				}
+			}
+		}
 		return 1, nil
 	}
 }
@@ -539,9 +729,11 @@ func validateAt(terms []any, pos int) (int, error) {
 //
 //	[('field','operator',value), '|', ('field2','op2',value2), ...]
 //
-// Returns an empty slice for empty or trivially invalid input (no outer brackets).
-// Returns ErrSyntax for structurally invalid domains that begin with '['.
-// Returns ErrNotEnoughAndOrTerms / ErrNotEnoughNotTerms for prefix-notation arity violations.
+// Input that is empty or lacks outer brackets is not treated as a domain and
+// yields an empty slice with no error. Any input that begins with '[' must be
+// a well-formed domain end to end: lexer, parser, and arity errors are all
+// reported (ErrSyntax, ErrNotEnoughAndOrTerms, ErrNotEnoughNotTerms) rather
+// than silently producing an empty result.
 func ParseDomain(domain string) (filter []any, err error) {
 	domain = strings.TrimSpace(domain)
 	if domain == "" {
@@ -551,12 +743,15 @@ func ParseDomain(domain string) (filter []any, err error) {
 	// Tokenize
 	tokens, lexErr := newLexer(domain).tokenize()
 	if lexErr != nil {
-		// Lex failure on input without brackets is not an error — just not a domain.
-		return []any{}, nil
+		// Input without brackets is not a domain — not an error.
+		if !strings.HasPrefix(domain, "[") {
+			return []any{}, nil
+		}
+		return []any{}, lexErr
 	}
 
 	// Domain must start with [
-	if len(tokens) == 0 || tokens[0].typ != tokLBracket {
+	if tokens[0].typ != tokLBracket {
 		return []any{}, nil
 	}
 
@@ -564,15 +759,12 @@ func ParseDomain(domain string) (filter []any, err error) {
 	p := newParser(tokens)
 	result, parseErr := p.parseDomain()
 	if parseErr != nil {
-		if errors.Is(parseErr, ErrSyntax) {
-			return []any{}, ErrSyntax
-		}
-		return []any{}, nil
+		return []any{}, parseErr
 	}
 
 	// Must have consumed all tokens (except trailing EOF)
 	if p.peek().typ != tokEOF {
-		return []any{}, nil
+		return []any{}, fmt.Errorf("%w: unexpected trailing characters at position %d", ErrSyntax, p.peek().pos)
 	}
 
 	if len(result) == 0 {
@@ -589,10 +781,18 @@ func ValidateDomain(terms []any) (results []any, err error) {
 	return validateDomain(terms)
 }
 
-// Fields splits a comma-separated field list into individual field names.
+// Fields splits a comma-separated field list into individual field names,
+// trimming surrounding whitespace. Empty entries are dropped.
 func Fields(field string) []string {
-	if field != "" {
-		return strings.Split(field, ",")
+	if field == "" {
+		return []string{}
 	}
-	return []string{}
+	parts := strings.Split(field, ",")
+	fields := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if name := strings.TrimSpace(part); name != "" {
+			fields = append(fields, name)
+		}
+	}
+	return fields
 }
