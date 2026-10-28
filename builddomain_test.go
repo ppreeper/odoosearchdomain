@@ -1,6 +1,7 @@
 package odoosearchdomain
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -94,28 +95,63 @@ func TestDomainNot(t *testing.T) {
 }
 
 func TestDomainAddConnector(t *testing.T) {
+	// Connectors chain with the other builder methods.
 	dom := NewDomain()
-	if _, err := dom.AddConnector("!"); err != nil {
-		t.Fatalf("expected valid connector, got error: %v", err)
-	}
-	if _, err := dom.AddConnector("bad"); err == nil {
-		t.Error("expected error for invalid connector, got nil")
-	}
+	dom.AddTerm("a", "=", 1).
+		AddConnector("|").
+		AddTerm("b", "=", 2)
 
-	expected := []any{"!"}
+	expected := []any{[]any{"a", "=", 1}, "|", []any{"b", "=", 2}}
 	if got := dom.ToList(); !reflect.DeepEqual(got, expected) {
 		t.Errorf("expected %v, got %v", expected, got)
 	}
 }
 
+func TestDomainValidate(t *testing.T) {
+	valid := NewDomain()
+	valid.Or(NewTerm("a", "=", 1), NewTerm("b", "=", 2))
+	if err := valid.Validate(); err != nil {
+		t.Errorf("expected valid domain, got error: %v", err)
+	}
+
+	incomplete := NewDomain()
+	incomplete.AddConnector("&").AddTerm("a", "=", 1)
+	if err := incomplete.Validate(); !errors.Is(err, ErrNotEnoughAndOrTerms) {
+		t.Errorf("expected ErrNotEnoughAndOrTerms, got: %v", err)
+	}
+}
+
 func TestDomainAddNil(t *testing.T) {
+	// A nil operand makes the expression incomplete, so the group is skipped
+	// and the domain stays valid.
 	dom := NewDomain()
 	dom.Add(nil)
 	dom.Not(nil)
+	dom.And(nil, nil)
+	dom.And(NewTerm("a", "=", 1), nil)
 
-	expected := []any{"!"}
+	expected := []any{}
 	if got := dom.ToList(); !reflect.DeepEqual(got, expected) {
 		t.Errorf("expected %v, got %v", expected, got)
+	}
+	if err := dom.Validate(); err != nil {
+		t.Errorf("expected empty domain to validate, got: %v", err)
+	}
+}
+
+func TestDomainToListNil(t *testing.T) {
+	var dom *Domain
+	if got := dom.ToList(); !reflect.DeepEqual(got, []any{}) {
+		t.Errorf("expected empty slice for nil domain, got %v", got)
+	}
+}
+
+func TestDomainListDoesNotAlias(t *testing.T) {
+	src := []any{"a", "b"}
+	got := DomainList(src)
+	src[0] = "changed"
+	if got[0] != "a" {
+		t.Errorf("DomainList aliases its input: got %v", got)
 	}
 }
 

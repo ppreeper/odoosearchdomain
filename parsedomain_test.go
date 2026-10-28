@@ -107,6 +107,18 @@ var searchDomainPatterns = []struct {
 	{`[("name","=","abc)]`, []any{}, ErrSyntax},            // unterminated double-quoted string
 	{"[('a','=','1')] garbage", []any{}, ErrSyntax},        // trailing characters after ']'
 	{"[('a','=','1'),]", []any{[]any{"a", "=", "1"}}, nil}, // trailing comma is allowed
+
+	// Invalid Unicode escapes are rejected, not silently replaced
+	{`[('a','=','\U00110000')]`, []any{}, ErrSyntax}, // out of range
+	{`[('a','=','\uD800')]`, []any{}, ErrSyntax},     // surrogate
+
+	// Nested domain arity is validated
+	{"[('x','any',['!'])]", []any{}, ErrNotEnoughNotTerms},
+	{"[('x','any',['&',('a','=',1)])]", []any{}, ErrNotEnoughAndOrTerms},
+	{"[('x','any',['|',('a','=',1),('b','=',2)])]", []any{[]any{"x", "any", []any{"|", []any{"a", "=", 1}, []any{"b", "=", 2}}}}, nil},
+
+	// A plain list value starting with a connector character is not a domain
+	{"[('x','in',['&','a'])]", []any{[]any{"x", "in", []any{"&", "a"}}}, nil},
 }
 
 // TestSearchDomain tests the ParseDomain function with various search domain patterns.
@@ -120,6 +132,65 @@ func TestSearchDomain(t *testing.T) {
 			t.Errorf("\n[%d]: domain: %v\nexpected error: %v\ngot %v", i, pattern.domain, pattern.err, err)
 		}
 	}
+}
+
+// TestParseDomain_NestedValidation verifies that errors inside a nested domain
+// are reported with their real cause rather than masked by the list fallback.
+func TestParseDomain_NestedValidation(t *testing.T) {
+	_, err := ParseDomain("[('x','any',[('a','badop',1)])]")
+	if !errors.Is(err, ErrSyntax) {
+		t.Fatalf("expected ErrSyntax, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "badop") {
+		t.Errorf("expected error to name the bad operator, got: %v", err)
+	}
+}
+
+// TestParseDomain_InvalidEscape verifies that out-of-range code points are
+// rejected instead of being silently replaced with U+FFFD.
+func TestParseDomain_InvalidEscape(t *testing.T) {
+	_, err := ParseDomain(`[('a','=','\U00110000')]`)
+	if !errors.Is(err, ErrSyntax) {
+		t.Fatalf("expected ErrSyntax for out-of-range code point, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "\uFFFD") {
+		t.Errorf("error message contains a replacement character: %q", err.Error())
+	}
+}
+
+// FuzzParseDomain asserts the parser's core invariants: it must not panic,
+// every error must be one of the sentinel errors, and anything it accepts
+// must pass ValidateDomain.
+func FuzzParseDomain(f *testing.F) {
+	for _, seed := range []string{
+		"", "[]", "[()]", "[('name','=','x')]",
+		"[('a','in',[1,2])]", "['|',('a','=',1),('b','=',2)]",
+		"[('a','any',[('b','=',1)])]", `[('a','=','\x41')]`,
+		"[('a','any',['!'])]", "[('a','=','x')] garbage",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		res, err := ParseDomain(s)
+		if err != nil {
+			if res == nil {
+				t.Fatalf("nil result with error %v (input %q)", err, s)
+			}
+			switch {
+			case errors.Is(err, ErrSyntax),
+				errors.Is(err, ErrNotEnoughAndOrTerms),
+				errors.Is(err, ErrNotEnoughNotTerms):
+			default:
+				t.Fatalf("unexpected error type %v (input %q)", err, s)
+			}
+			return
+		}
+		if len(res) > 0 {
+			if _, verr := ValidateDomain(res); verr != nil {
+				t.Fatalf("accepted %q but validation failed: %v", s, verr)
+			}
+		}
+	})
 }
 
 // TestParseDomain_NestingLimit verifies that deeply nested list values are

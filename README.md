@@ -40,7 +40,10 @@ result, err := odoosearchdomain.ParseDomain(
 Both single quotes (`'...'`) and double quotes (`"..."`) are supported for strings.
 Backslash escapes are decoded the way Python's `repr()` encodes them: `\'`, `\"`,
 `\\`, `\n`, `\t`, `\r`, `\b`, `\f`, `\v`, `\a`, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`.
-Unknown escapes pass through as a literal backslash plus the character.
+Unknown escapes (including `\N{NAME}`) pass through as a literal backslash plus
+the character, and a `\x`/`\u`/`\U` escape with too few hex digits is likewise
+kept literally. Code points outside the Unicode range, and surrogates, are
+rejected with `ErrSyntax` rather than replaced.
 
 Integers that overflow `int` (Python integers are unbounded) fall back to `float64`.
 
@@ -55,7 +58,20 @@ Integers that overflow `int` (Python integers are unbounded) fall back to `float
 Input that lacks outer `[...]` brackets returns an empty slice with no error.
 Input that begins with `[` must be a well-formed domain end to end — lexer,
 parser, and arity errors are all reported rather than silently producing an
-empty result. Nesting deeper than 1000 levels is rejected with `ErrSyntax`.
+empty result. Nested domains (values of `any`, `child_of`, and friends) are
+validated too. Nesting deeper than 1000 levels is rejected with `ErrSyntax`.
+
+### Breaking changes
+
+These differ from earlier releases:
+
+- Bracketed input is no longer silently accepted when malformed. `ParseDomain`
+  now returns `ErrSyntax` for inputs such as `[1,2,3]` (a plain list, not a
+  domain) and for anything else beginning with `[` that does not parse. Callers
+  that relied on "empty slice means no filter" should treat a non-nil error as
+  "do not run the query".
+- `Fields` trims whitespace and drops empty entries, so `Fields("a,,b")` returns
+  `["a", "b"]` rather than `["a", "", "b"]`.
 
 ### Validation
 
@@ -93,11 +109,15 @@ list := dom.ToList()
 | `NewDomain() *Domain`           | Create an empty domain                               |
 | `AddTerm(field, op, value)`     | Append a term                                        |
 | `Add(term *Term)`               | Append a pre-built term (nil is ignored)             |
-| `AddConnector(op string)`       | Append a bare `"&"`, `"\|"`, or `"!"` connector      |
+| `AddConnector(op)`              | Append a bare `"&"`, `"\|"`, or `"!"` connector      |
 | `And(term1, term2 *Term)`       | Append `"&"` followed by two terms                   |
 | `Or(term1, term2 *Term)`        | Append `"\|"` followed by two terms                  |
 | `Not(term *Term)`               | Append `"!"` followed by one term                    |
+| `Validate() error`              | Check the built domain's operator arity              |
 | `ToList() []any`                | Serialize to a flat `[]any` for JSON-RPC              |
+
+`And`, `Or`, and `Not` skip the whole group when an operand is `nil`, so a
+missing term never leaves a dangling connector behind.
 
 ### Utility functions
 

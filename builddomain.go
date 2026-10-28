@@ -1,18 +1,17 @@
 package odoosearchdomain
 
-import "fmt"
+import "slices"
 
 // DomainList normalizes variadic domain arguments into a single []any.
-// A single []any argument is returned as-is; multiple arguments are returned
-// as a slice in call order. Unlike the elements themselves, no argument is
-// ever discarded.
+// A single []any argument is returned as a copy; multiple arguments are
+// returned as a slice in call order. No argument is ever discarded.
 func DomainList(domains ...any) []any {
 	if len(domains) == 0 {
 		return []any{}
 	}
 	if len(domains) == 1 {
 		if values, ok := domains[0].([]any); ok {
-			return values
+			return slices.Clone(values)
 		}
 	}
 	return domains
@@ -40,8 +39,12 @@ func NewDomain() *Domain {
 
 // ToList serializes the domain into the flat []any wire format: each Term
 // becomes a []any tuple, and every other element (connector strings and raw
-// values alike) is passed through unchanged — nothing is dropped.
+// values alike) is passed through unchanged — nothing is dropped. A nil
+// domain serializes to an empty slice.
 func (dom *Domain) ToList() []any {
+	if dom == nil {
+		return []any{}
+	}
 	list := make([]any, 0, len(*dom))
 	for _, val := range *dom {
 		if term, ok := val.(Term); ok {
@@ -51,6 +54,12 @@ func (dom *Domain) ToList() []any {
 		list = append(list, val)
 	}
 	return list
+}
+
+// Validate reports whether the built domain has correct operator arity.
+func (dom *Domain) Validate() error {
+	_, err := ValidateDomain(dom.ToList())
+	return err
 }
 
 // AddTerm appends a new (field, operator, value) term to the domain.
@@ -67,16 +76,12 @@ func (dom *Domain) Add(term *Term) *Domain {
 	return dom
 }
 
-// AddConnector appends a bare logical connector to the domain.
-// The operator must be one of "&", "|", or "!".
-func (dom *Domain) AddConnector(operator string) (*Domain, error) {
-	switch operator {
-	case "&", "|", "!":
-		*dom = append(*dom, operator)
-		return dom, nil
-	default:
-		return dom, fmt.Errorf("invalid connector %q: must be \"&\", \"|\", or \"!\"", operator)
-	}
+// AddConnector appends a bare logical connector to the domain. Use Validate
+// to check the finished domain; connectors are only meaningful in prefix
+// position relative to their operands.
+func (dom *Domain) AddConnector(operator string) *Domain {
+	*dom = append(*dom, operator)
+	return dom
 }
 
 // And appends the "&" connector followed by the two operand terms.
@@ -97,16 +102,19 @@ func (dom *Domain) Not(term *Term) *Domain {
 	return dom.combinedTerms("!", term)
 }
 
-// combinedTerms appends a connector followed by the given terms.
-// Nil terms are skipped.
+// combinedTerms appends a connector followed by the given terms. A nil
+// operand makes the expression incomplete, so the whole group is skipped
+// rather than emitting a dangling connector.
 func (dom *Domain) combinedTerms(operator string, terms ...*Term) *Domain {
-	*dom = append(*dom, operator)
+	operands := make([]any, 0, len(terms))
 	for _, term := range terms {
 		if term == nil {
-			continue
+			return dom
 		}
-		*dom = append(*dom, *term)
+		operands = append(operands, *term)
 	}
+	*dom = append(*dom, operator)
+	*dom = append(*dom, operands...)
 	return dom
 }
 

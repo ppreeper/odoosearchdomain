@@ -131,7 +131,11 @@ func (l *lexer) lexString(quote rune) (token, error) {
 	for l.pos < len(l.input) {
 		r := l.advance()
 		if r == '\\' && l.pos < len(l.input) {
-			sb.WriteString(l.unescape(l.advance()))
+			s, err := l.unescape(l.advance())
+			if err != nil {
+				return token{}, err
+			}
+			sb.WriteString(s)
 			continue
 		}
 		if r == quote {
@@ -144,40 +148,49 @@ func (l *lexer) lexString(quote rune) (token, error) {
 
 // unescape decodes the rune following a backslash, consuming additional input
 // for multi-character escapes (\xNN, \uNNNN, \UNNNNNNNN). Unknown escapes are
-// passed through as a literal backslash plus the rune.
-func (l *lexer) unescape(r rune) string {
+// passed through as a literal backslash plus the rune. Out-of-range and
+// surrogate code points are rejected rather than silently replaced.
+func (l *lexer) unescape(r rune) (string, error) {
 	switch r {
 	case '\'', '"', '\\':
-		return string(r)
+		return string(r), nil
 	case 'n':
-		return "\n"
+		return "\n", nil
 	case 't':
-		return "\t"
+		return "\t", nil
 	case 'r':
-		return "\r"
+		return "\r", nil
 	case 'b':
-		return "\b"
+		return "\b", nil
 	case 'f':
-		return "\f"
+		return "\f", nil
 	case 'v':
-		return "\v"
+		return "\v", nil
 	case 'a':
-		return "\a"
+		return "\a", nil
 	case 'x':
 		if v, ok := l.readHex(2); ok {
-			return string(rune(v))
+			return string(rune(v)), nil
 		}
 	case 'u':
 		if v, ok := l.readHex(4); ok {
-			return string(rune(v))
+			return encodedRune(v, l.pos)
 		}
 	case 'U':
-		// Out-of-range code points decode to U+FFFD via string(rune(v)).
 		if v, ok := l.readHex(8); ok {
-			return string(rune(v))
+			return encodedRune(v, l.pos)
 		}
 	}
-	return "\\" + string(r)
+	return "\\" + string(r), nil
+}
+
+// encodedRune converts a decoded escape code point into a string, rejecting
+// values that are not Unicode scalar values (out of range or surrogates).
+func encodedRune(v int64, pos int) (string, error) {
+	if v > unicode.MaxRune || (v >= 0xD800 && v <= 0xDFFF) {
+		return "", fmt.Errorf("%w: invalid Unicode code point U+%04X at position %d", ErrSyntax, v, pos)
+	}
+	return string(rune(v)), nil
 }
 
 // readHex reads n hex digits and returns their value, or false if fewer than
@@ -528,18 +541,36 @@ func (p *parser) parseValue() (any, error) {
 }
 
 // parseListOrDomain disambiguates between a nested domain [(...), ...] and a plain list [1,2,3].
-// If the first element after [ is '(' or a connector string, it tries domain parsing first.
+// If the first element after [ is a tuple or a connector string, it tries domain
+// parsing first. Nested domains are validated here, since only the parser knows
+// which interpretation was chosen.
 func (p *parser) parseListOrDomain() (any, error) {
 	next := p.peekAt(1) // token after '['
 
-	// If first element looks like a domain (tuple start or connector), try domain parse.
-	if next.typ == tokLParen || (next.typ == tokString && (next.str == "&" || next.str == "|" || next.str == "!")) {
+	// A plain value list can never start with '(' — a term tuple is the only
+	// reading, so propagate domain errors instead of masking them.
+	if next.typ == tokLParen {
+		domain, err := p.parseDomain()
+		if err != nil {
+			return nil, err
+		}
+		if err := validateTerms(domain, p.depth); err != nil {
+			return nil, err
+		}
+		return domain, nil
+	}
+
+	// If the first element looks like a domain connector, try domain parsing.
+	if next.typ == tokString && (next.str == "&" || next.str == "|" || next.str == "!") {
 		savePos := p.pos
 		domain, err := p.parseDomain()
 		if err == nil {
+			if verr := validateTerms(domain, p.depth); verr != nil {
+				return nil, verr
+			}
 			return domain, nil
 		}
-		p.pos = savePos // backtrack on failure
+		p.pos = savePos // backtrack: it was a plain list of strings
 	}
 
 	// Otherwise parse as a plain value list.
@@ -591,15 +622,47 @@ func (p *parser) parseList() ([]any, error) {
 // validateDomain walks the flat token list and checks that every & and | has
 // 2 operands, and every ! has 1 operand, using proper recursive consumption.
 func validateDomain(terms []any) ([]any, error) {
+	if err := validateTerms(terms, 0); err != nil {
+		return []any{}, err
+	}
+	return terms, nil
+}
+
+// validateTerms checks a complete term sequence at the given nesting depth.
+// Nested domains held in term values are validated recursively.
+func validateTerms(terms []any, depth int) error {
 	pos := 0
 	for pos < len(terms) {
-		count, err := validateAt(terms, pos, 0)
+		count, err := validateAt(terms, pos, depth)
 		if err != nil {
-			return []any{}, err
+			return err
 		}
 		pos += count
 	}
-	return terms, nil
+	return nil
+}
+
+// looksLikeDomain reports whether v starts like a prefix-notation domain: a
+// term tuple, or a connector followed by at least one term tuple. Requiring a
+// tuple keeps plain string lists such as ['&', 'a'] out.
+func looksLikeDomain(v []any) bool {
+	if len(v) == 0 {
+		return false
+	}
+	switch first := v[0].(type) {
+	case []any:
+		return true
+	case string:
+		if first != "&" && first != "|" && first != "!" {
+			return false
+		}
+		for _, elem := range v[1:] {
+			if _, ok := elem.([]any); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateAt validates the expression rooted at terms[pos] and returns
@@ -643,7 +706,15 @@ func validateAt(terms []any, pos, depth int) (int, error) {
 		return 1 + count, nil
 
 	default:
-		// Leaf term (a []any tuple) — consumes 1
+		// Leaf term (a []any tuple) — consumes 1. Validate any nested domain
+		// held in the term's value.
+		if term, ok := terms[pos].([]any); ok && len(term) == 3 {
+			if nested, ok := term[2].([]any); ok && looksLikeDomain(nested) {
+				if err := validateTerms(nested, depth+1); err != nil {
+					return 0, err
+				}
+			}
+		}
 		return 1, nil
 	}
 }
