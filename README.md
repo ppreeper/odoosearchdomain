@@ -29,6 +29,7 @@ result, err := odoosearchdomain.ParseDomain(
 | `'text'` or `"text"`      | `string` | `('name', '=', 'ABC')`                       |
 | `123`, `-5`               | `int`    | `('ref', '=', 12345)`                        |
 | `1.23`, `-0.5`            | `float64`| `('amount', '=', 123.45)`                    |
+| `1e+21`, `1.5e-3`         | `float64`| `('amount', '=', 1e+21)` (Python's repr)    |
 | `True`, `true`            | `bool`   | `('active', '=', True)`                      |
 | `False`, `false`          | `bool`   | `('active', '=', False)`                     |
 | `None`, `none`            | `nil`    | `('parent_id', '=', None)`                   |
@@ -37,7 +38,11 @@ result, err := odoosearchdomain.ParseDomain(
 | `[('field','op',val)]`   | `[]any`  | `('line', 'any', [('qty', '<=', 0)])`        |
 
 Both single quotes (`'...'`) and double quotes (`"..."`) are supported for strings.
-Backslash escapes (`\'`, `\"`, `\\`) are handled within quoted strings.
+Backslash escapes are decoded the way Python's `repr()` encodes them: `\'`, `\"`,
+`\\`, `\n`, `\t`, `\r`, `\b`, `\f`, `\v`, `\a`, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`.
+Unknown escapes pass through as a literal backslash plus the character.
+
+Integers that overflow `int` (Python integers are unbounded) fall back to `float64`.
 
 ### Errors
 
@@ -48,6 +53,9 @@ Backslash escapes (`\'`, `\"`, `\\`) are handled within quoted strings.
 | `ErrNotEnoughNotTerms`     | `!` operator missing required 1 operand              |
 
 Input that lacks outer `[...]` brackets returns an empty slice with no error.
+Input that begins with `[` must be a well-formed domain end to end — lexer,
+parser, and arity errors are all reported rather than silently producing an
+empty result. Nesting deeper than 1000 levels is rejected with `ErrSyntax`.
 
 ### Validation
 
@@ -84,7 +92,8 @@ list := dom.ToList()
 | ------------------------------- | ---------------------------------------------------- |
 | `NewDomain() *Domain`           | Create an empty domain                               |
 | `AddTerm(field, op, value)`     | Append a term                                        |
-| `Add(term *Term)`               | Append a pre-built term                              |
+| `Add(term *Term)`               | Append a pre-built term (nil is ignored)             |
+| `AddConnector(op string)`       | Append a bare `"&"`, `"\|"`, or `"!"` connector      |
 | `And(term1, term2 *Term)`       | Append `"&"` followed by two terms                   |
 | `Or(term1, term2 *Term)`        | Append `"\|"` followed by two terms                  |
 | `Not(term *Term)`               | Append `"!"` followed by one term                    |
@@ -94,9 +103,9 @@ list := dom.ToList()
 
 | Function                        | Description                                          |
 | ------------------------------- | ---------------------------------------------------- |
-| `DomainList(domains ...any)`    | Normalize variadic domain args into `[]any`          |
+| `DomainList(domains ...any)`    | Normalize variadic domain args into `[]any` (nothing is discarded) |
 | `DomainString(domains ...string)` | Normalize variadic string args into `[]string`     |
-| `Fields(field string)`          | Split a comma-separated field list                   |
+| `Fields(field string)`          | Split a comma-separated field list, trimming spaces  |
 
 ## Odoo Search Domain Reference
 
@@ -184,9 +193,9 @@ Negate an OR combination:
 
 The parser uses a two-phase approach:
 
-**Phase 1 -- Lexer.** A single-pass O(n) tokenizer converts the input string into a stream of typed tokens (brackets, parens, commas, quoted strings, numbers, booleans, None).
+**Phase 1 -- Lexer.** A single-pass O(n) tokenizer converts the input string into a stream of typed tokens (brackets, parens, commas, quoted strings, numbers with optional decimal fraction and base-10 exponent, booleans, None). Quoted strings decode Python-style backslash escapes.
 
-**Phase 2 -- Recursive descent parser.** Consumes the token stream according to this grammar:
+**Phase 2 -- Recursive descent parser.** Consumes the token stream according to this grammar. Nesting is bounded at 1000 levels to protect against stack exhaustion on hostile input:
 
 ```
 domain  -> '[' items ']' | '[]' | '[()]'
